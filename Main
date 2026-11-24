@@ -1,0 +1,97 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <pgmspace.h>
+#include "AudioFileSourcePROGMEM.h"
+#include "AudioGeneratorMP3.h"
+#include "AudioOutputI2S.h"
+#include "my_song.h" // MP3 file converted to a byte array
+
+// OLED display settings
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1 
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Wave animation parameters
+float phase = 0.0;
+const float waveSpeed = 0.15; 
+const float frequency = 0.05; 
+int amplitude = 14;
+const int centerY = 36;       
+
+// Audio and FreeRTOS objects
+AudioGeneratorMP3 *mp3;
+AudioFileSourcePROGMEM *file;
+AudioOutputI2S *out;
+TaskHandle_t AudioTask;
+
+// Core 0 task: handles MP3 decoding in the background
+void audioTaskCode( void * pvParameters ) {
+  for(;;) {
+    if (mp3->isRunning()) {
+      if (!mp3->loop()) mp3->stop();
+    }
+    vTaskDelay(1); // Prevents watchdog timer reset
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize I2C (SDA = GPIO 5, SCL = GPIO 4) and OLED at 0x3C
+  Wire.begin(5, 4);
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    for(;;); // Halt if display fails to initialize
+  }
+  display.clearDisplay();
+  display.display();
+
+  // Initialize I2S amplifier (BCLK = 15, LRC = 16, DIN = 17)
+  out = new AudioOutputI2S();
+  out->SetPinout(15, 16, 17); 
+  out->SetGain(0.3); 
+
+  // Load and start MP3 playback from flash memory
+  file = new AudioFileSourcePROGMEM(my_song_array, sizeof(my_song_array));
+  mp3 = new AudioGeneratorMP3();
+  mp3->begin(file, out);
+
+  // Pin audio decoding to Core 0 so OLED rendering doesn't cause stuttering
+  xTaskCreatePinnedToCore(
+    audioTaskCode, "AudioTask", 10000, NULL, 1, &AudioTask, 0
+  );
+}
+
+void loop() {
+  // Core 1 loop: renders wave animation on the OLED
+  display.clearDisplay();
+
+  // React wave height to playback status
+  if (mp3->isRunning()) {
+     amplitude = random(8, 24);
+  } else {
+     amplitude = 2; // Idle ripple when song ends
+  }
+
+  // Draw 4 layered sine/cosine waves across the screen
+  for (int x = 0; x < SCREEN_WIDTH; x++) {
+    int y1 = centerY + sin(x * frequency + phase) * amplitude;
+    int y2 = centerY + sin(x * (frequency * 0.8) + phase + 1.5) * (amplitude * 0.8);
+    int y3 = centerY + 12 + sin(x * (frequency * 1.5) - phase) * 4;
+    int y4 = centerY - 10 + cos(x * (frequency * 0.5) + (phase * 0.5)) * 6;
+
+    // Main thick wave and secondary wave
+    display.drawPixel(x, y1, WHITE);
+    display.drawPixel(x, y1 - 1, WHITE); 
+    display.drawPixel(x, y2, WHITE);
+    
+    // Dotted background waves
+    if (x % 2 == 0) display.drawPixel(x, y3, WHITE);
+    if (x % 3 == 0) display.drawPixel(x, y4, WHITE);
+  }
+
+  display.display();
+  phase -= waveSpeed; // Advance wave animation
+}
